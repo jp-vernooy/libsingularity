@@ -68,6 +68,41 @@ namespace Singularity {
             }
         }
 
+        /** in-addr.arpa zone of an IPv4 prefix, or null when the prefix does not end on an octet. */
+        internal static string? reverse_zone(string cidr) {
+            int slash = cidr.index_of("/");
+            if (slash < 0) return null;
+            uint64 len;
+            if (!uint64.try_parse(cidr.substring(slash + 1).strip(), out len) || len < 8 || len > 32 || len % 8 != 0)
+                return null;
+            string ip = cidr.substring(0, slash).strip();
+            if (!NmClient.ipv4_valid(ip)) return null;
+            string[] octets = ip.split(".");
+            string zone = "in-addr.arpa";
+            for (int i = 0; i < (int) len / 8; i++) zone = octets[i] + "." + zone;
+            return zone;
+        }
+
+        /**
+         * DNS routing for a WireGuard connection. Names in the DNS line become
+         * search domains, as wg-quick does. A split tunnel also gets a routing
+         * domain for the reverse zone of each IPv4 network it carries, so its
+         * DNS servers answer for those networks and not for the whole internet.
+         */
+        private static void wireguard_dns(NmSettings s, bool in_ipv4, string[] domains, string[] allowed_ips) {
+            string[] search = {};
+            foreach (var d in domains) search += d;
+            bool full = false;
+            foreach (var ip in allowed_ips) if (ip == "0.0.0.0/0" || ip == "::/0") full = true;
+            if (!full) {
+                foreach (var ip in allowed_ips) {
+                    string? zone = reverse_zone(ip);
+                    if (zone != null && !(("~" + zone) in search)) search += "~" + zone;
+                }
+            }
+            if (search.length > 0) s.set(in_ipv4 ? "ipv4" : "ipv6", "dns-search", new Variant.strv(search));
+        }
+
         private static void ip_methods(NmSettings s, bool has4, bool has6) {
             if (!has4 && !has6) {
                 s.set("ipv4", "method", "auto");
@@ -114,6 +149,7 @@ namespace Singularity {
             add_cidrs(s, address, ref has4, ref has6);
             ip_methods(s, has4, has6);
             add_dns(s, dns);
+            wireguard_dns(s, has4 || !has6, {}, list);
             return s.build();
         }
 
@@ -128,6 +164,7 @@ namespace Singularity {
             string section = "";
             string addresses = "";
             string dns = "";
+            string[] allowed_ips = {};
             foreach (var raw in text.split("\n")) {
                 int hash = raw.index_of("#");
                 string line = (hash >= 0 ? raw.substring(0, hash) : raw).strip();
@@ -173,6 +210,7 @@ namespace Singularity {
                             string[] list = {};
                             foreach (var ip in v.split(",")) if (ip.strip() != "") list += ip.strip();
                             peer.add("{sv}", "allowed-ips", new Variant.strv(list));
+                            foreach (var ip in list) allowed_ips += ip;
                             break;
                         default: throw new NmImportError.INVALID("Unknown peer key %s", k);
                     }
@@ -187,11 +225,15 @@ namespace Singularity {
             add_cidrs(s, addresses, ref has4, ref has6);
             ip_methods(s, has4, has6);
             string[] dns_ips = {};
+            string[] domains = {};
             foreach (var d in dns.split(",")) {
                 string t = d.strip();
-                if (t != "" && new InetAddress.from_string(t) != null) dns_ips += t;
+                if (t == "") continue;
+                if (new InetAddress.from_string(t) != null) dns_ips += t;
+                else domains += t;
             }
             add_dns(s, string.joinv(",", dns_ips));
+            wireguard_dns(s, has4 || !has6, domains, allowed_ips);
             return s.build();
         }
 

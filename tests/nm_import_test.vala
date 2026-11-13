@@ -73,6 +73,8 @@ AllowedIPs = 10.9.0.0/16
     var dns = conn.ipv4_dns ();
     assert (dns.length == 1 && dns[0] == "9.9.9.9");
     assert (setting (s, "ipv6", "dns").n_children () == 1);
+    var search = setting (s, "ipv4", "dns-search").get_strv ();
+    assert (search.length == 1 && search[0] == "corp.example");
 }
 
 void test_wireguard_errors () {
@@ -339,6 +341,44 @@ void test_vpn_conflicts () throws Error {
     assert (!split.vpn_conflicts_with (office));
 }
 
+void test_wireguard_split_dns () throws Error {
+    string conf = """
+[Interface]
+PrivateKey = %s
+Address = 10.8.0.2/24
+DNS = 10.9.0.53, corp.example
+
+[Peer]
+PublicKey = %s
+AllowedIPs = 10.9.0.0/16, 192.168.40.0/24, 172.16.0.0/12, fd09::/48
+""".printf (KEY_A, KEY_B);
+    var s = NmImport.wireguard_conf (conf, "office");
+    var search = setting (s, "ipv4", "dns-search").get_strv ();
+    assert (search.length == 3);
+    assert (search[0] == "corp.example");
+    assert (search[1] == "~9.10.in-addr.arpa");
+    assert (search[2] == "~40.168.192.in-addr.arpa");
+
+    string full = """
+[Interface]
+PrivateKey = %s
+Address = 10.8.0.2/24
+DNS = 9.9.9.9, corp.example
+
+[Peer]
+PublicKey = %s
+AllowedIPs = 0.0.0.0/0, 10.9.0.0/16
+""".printf (KEY_A, KEY_B);
+    search = setting (NmImport.wireguard_conf (full, "all"), "ipv4", "dns-search").get_strv ();
+    assert (search.length == 1 && search[0] == "corp.example");
+
+    var manual = NmImport.wireguard_manual ("m", KEY_A, "10.0.0.5/32", "10.9.0.53", KEY_B, "", "10.9.0.0/16", null);
+    search = setting (manual, "ipv4", "dns-search").get_strv ();
+    assert (search.length == 1 && search[0] == "~9.10.in-addr.arpa");
+    assert (setting (NmImport.wireguard_manual ("m", KEY_A, "10.0.0.5/32", "", KEY_B, "", "", null),
+        "ipv4", "dns-search") == null);
+}
+
 int main (string[] args) {
     Test.init (ref args);
     Test.add_func ("/nm/addresses", test_addresses);
@@ -350,5 +390,6 @@ int main (string[] args) {
     Test.add_func ("/nm/simple", test_simple_profiles);
     Test.add_func ("/nm/ipv4-changes", () => { try { test_ipv4_changes (); } catch (Error e) { error (e.message); } });
     Test.add_func ("/nm/vpn-conflicts", () => { try { test_vpn_conflicts (); } catch (Error e) { error (e.message); } });
+    Test.add_func ("/nm/wireguard-split-dns", () => { try { test_wireguard_split_dns (); } catch (Error e) { error (e.message); } });
     return Test.run ();
 }
