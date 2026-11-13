@@ -341,6 +341,31 @@ void test_vpn_conflicts () throws Error {
     assert (!split.vpn_conflicts_with (office));
 }
 
+void test_vpn_secondaries () throws Error {
+    var wifi = new NmConnection.detached (NmImport.wifi ("Home", "secret123"));
+    assert (wifi.secondaries ().length == 0);
+    assert (wifi.with_secondary ("uuid-a", false) == null);
+    var one = new NmConnection.detached (wifi.with_secondary ("uuid-a", true));
+    assert (one.secondaries ().length == 1 && one.secondaries ()[0] == "uuid-a");
+    assert (one.wifi_ssid () == "Home");
+    assert (one.with_secondary ("uuid-a", true) == null);
+    var two = new NmConnection.detached (one.with_secondary ("uuid-b", true));
+    assert (two.secondaries ().length == 2 && two.secondaries ()[1] == "uuid-b");
+    var left = new NmConnection.detached (two.with_secondary ("uuid-a", false));
+    assert (left.secondaries ().length == 1 && left.secondaries ()[0] == "uuid-b");
+    var none = new NmConnection.detached (left.with_secondary ("uuid-b", false));
+    assert (none.secondaries ().length == 0);
+    assert (none.get_id () == wifi.get_id ());
+
+    var saved = new NmConnection.detached (NmImport.openvpn_manual ("v", "r.example", "u", "p", null));
+    assert (saved.vpn_secrets_saved ());
+    var kf = new KeyFile ();
+    kf.load_from_data ("[connection]\nid=v\ntype=vpn\n[vpn]\nservice-type=org.freedesktop.NetworkManager.openvpn\nremote=r.example\npassword-flags=1\n", -1, KeyFileFlags.NONE);
+    assert (!new NmConnection.detached (NmImport.keyfile (kf)).vpn_secrets_saved ());
+    kf.load_from_data ("[connection]\nid=v\ntype=vpn\n[vpn]\nservice-type=org.freedesktop.NetworkManager.openvpn\nremote=r.example\ncert-pass-flags=0\n", -1, KeyFileFlags.NONE);
+    assert (new NmConnection.detached (NmImport.keyfile (kf)).vpn_secrets_saved ());
+}
+
 void test_wireguard_split_dns () throws Error {
     string conf = """
 [Interface]
@@ -390,6 +415,7 @@ int main (string[] args) {
     Test.add_func ("/nm/simple", test_simple_profiles);
     Test.add_func ("/nm/ipv4-changes", () => { try { test_ipv4_changes (); } catch (Error e) { error (e.message); } });
     Test.add_func ("/nm/vpn-conflicts", () => { try { test_vpn_conflicts (); } catch (Error e) { error (e.message); } });
+    Test.add_func ("/nm/vpn-secondaries", () => { try { test_vpn_secondaries (); } catch (Error e) { error (e.message); } });
     Test.add_func ("/nm/wireguard-split-dns", () => { try { test_wireguard_split_dns (); } catch (Error e) { error (e.message); } });
     return Test.run ();
 }

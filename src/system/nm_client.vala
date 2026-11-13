@@ -91,6 +91,50 @@ namespace Singularity {
             }
         }
 
+        /** UUIDs of the connections that NetworkManager activates with this one, for example VPNs. */
+        public string[] secondaries() {
+            var v = value("connection", "secondaries");
+            return v != null && v.is_of_type(VariantType.STRING_ARRAY) ? v.get_strv() : new string[0];
+        }
+
+        /**
+         * These settings with uuid added to or removed from the secondaries,
+         * or null when the secondaries already match.
+         */
+        internal Variant? with_secondary(string uuid, bool present) {
+            string[] list = {};
+            bool found = false;
+            foreach (var entry in secondaries()) {
+                if (entry == uuid) {
+                    found = true;
+                    if (!present) continue;
+                }
+                list += entry;
+            }
+            if (found == present) return null;
+            if (present) list += uuid;
+            var changes = new HashTable<string, Variant?>(str_hash, str_equal);
+            changes.insert("secondaries", new Variant.strv(list));
+            return changed("connection", changes);
+        }
+
+        /**
+         * Whether NetworkManager can start this plugin VPN with no secret
+         * agent: no secret in vpn.data is agent-owned or never saved.
+         */
+        public bool vpn_secrets_saved() {
+            var data = value("vpn", "data");
+            if (data == null || !data.is_of_type(new VariantType("a{ss}"))) return true;
+            foreach (var entry in data) {
+                string key = entry.get_child_value(0).get_string();
+                if (!key.has_suffix("-flags")) continue;
+                uint64 flags = 0;
+                uint64.try_parse(entry.get_child_value(1).get_string(), out flags);
+                if ((flags & 0x3) != 0) return false;
+            }
+            return true;
+        }
+
         public string? wifi_ssid() {
             var v = value("802-11-wireless", "ssid");
             if (v == null || !v.is_of_type(new VariantType("ay"))) return null;

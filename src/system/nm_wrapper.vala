@@ -150,6 +150,8 @@ namespace Singularity {
                 if (conn.get_connection_type() == "802-11-wireless") wifi_connections_changed();
             });
             client.connection_removed.connect((conn) => {
+                // A secondary that does not exist stops its base connection.
+                if (conn.get_connection_type() == "vpn") remove_vpn_secondary.begin(conn.get_uuid());
                 vpn_connections_changed();
                 if (conn.get_connection_type() == "802-11-wireless") wifi_connections_changed();
             });
@@ -168,6 +170,8 @@ namespace Singularity {
             refresh_sharing_state();
             if (!is_vpn_type(client.active_type(path))) return;
             if (state == NmActiveState.ACTIVATED) {
+                var conn = client.connection(client.active_connection(path));
+                if (conn != null) add_vpn_secondary.begin(conn, path);
                 vpn_action_result(true, "VPN connected");
             } else if (state == NmActiveState.DEACTIVATED
                 && reason != NmActiveReason.NONE
@@ -474,9 +478,65 @@ namespace Singularity {
             }
         }
 
+        // The saved connection that carries a VPN: NetworkManager names its
+        // active connection as the specific object of the VPN, else the
+        // primary connection carries it.
+        private NmConnection? base_connection(string vpn_active) {
+            string? under = client.prop_path(vpn_active, NM_ACTIVE_IFACE, "SpecificObject");
+            if (under == null || !client.has_interface(under, NM_ACTIVE_IFACE)) under = client.primary_connection();
+            if (under == null || is_vpn_type(client.active_type(under))) return null;
+            return client.connection(client.active_connection(under));
+        }
+
+        private async bool enable_vpn_autoconnect(NmConnection conn) {
+            if (conn.autoconnect) return true;
+            var changes = new HashTable<string, Variant?>(str_hash, str_equal);
+            changes.insert("autoconnect", new Variant.boolean(true));
+            try {
+                yield conn.commit(conn.changed("connection", changes));
+                return true;
+            } catch (Error e) {
+                vpn_action_result(false, "Could not save VPN state: " + e.message);
+                return false;
+            }
+        }
+
+        // NetworkManager autoconnects WireGuard but not plugin VPNs. It starts
+        // the secondaries of a connection with it, so a plugin VPN that is up
+        // with autoconnect on becomes a secondary of the network under it. A
+        // secondary that fails also fails that network, so only a VPN that
+        // can connect without a secret agent qualifies.
+        private async void add_vpn_secondary(NmConnection conn, string active) {
+            if (conn.get_connection_type() != "vpn" || !conn.autoconnect || !conn.vpn_secrets_saved()) return;
+            var base_conn = base_connection(active);
+            var updated = base_conn != null ? base_conn.with_secondary(conn.get_uuid(), true) : null;
+            if (updated == null) return;
+            try {
+                yield base_conn.commit(updated);
+            } catch (Error e) {
+                warning("Cannot add VPN %s to %s: %s", conn.get_id(), base_conn.get_id(), e.message);
+            }
+        }
+
+        private async bool remove_vpn_secondary(string uuid) {
+            if (client == null) return true;
+            foreach (var other in client.get_connections()) {
+                var updated = other.with_secondary(uuid, false);
+                if (updated == null) continue;
+                try {
+                    yield other.commit(updated);
+                } catch (Error e) {
+                    vpn_action_result(false, "Could not save VPN state: " + e.message);
+                    return false;
+                }
+            }
+            return true;
+        }
+
         private async bool deactivate_vpn(NmConnection conn, bool save_state) {
             if (client == null) return false;
             if (save_state && !(yield disable_vpn_autoconnect(conn))) return false;
+            if (save_state && !(yield remove_vpn_secondary(conn.get_uuid()))) return false;
             var active = get_active_vpn(conn.get_uuid());
             if (active == null) return true;
             try {
@@ -617,6 +677,7 @@ namespace Singularity {
             foreach (var other in conflicting.data) {
                 if (!(yield deactivate_vpn(other, true))) return;
             }
+            if (!(yield enable_vpn_autoconnect(conn))) return;
             try {
                 yield client.activate(conn.path, null, null);
             } catch (Error e) {
