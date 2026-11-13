@@ -305,6 +305,40 @@ void test_ipv4_changes () throws Error {
     assert (failure != null);
 }
 
+NmConnection wireguard (string allowed_ips, bool never_default = false) throws Error {
+    var s = NmImport.wireguard_manual ("wg", KEY_A, "10.0.0.5/32", "", KEY_B, "h.example:51820", allowed_ips, null);
+    if (!never_default) return new NmConnection.detached (s);
+    var changes = new HashTable<string, Variant?> (str_hash, str_equal);
+    changes.insert ("never-default", new Variant.boolean (true));
+    return new NmConnection.detached (new NmConnection.detached (s).changed ("ipv4", changes));
+}
+
+void test_vpn_conflicts () throws Error {
+    var full = wireguard ("0.0.0.0/0, ::/0");
+    var office = wireguard ("10.9.0.0/16");
+    var lab = wireguard ("10.20.0.0/16, fd20::/48");
+    var office_host = wireguard ("10.9.4.7/32");
+    var pinned = wireguard ("0.0.0.0/0", true);
+    assert (full.vpn_routes_all_traffic ());
+    assert (!office.vpn_routes_all_traffic ());
+    assert (!pinned.vpn_routes_all_traffic ());
+    assert (office.wireguard_allowed_ips ().length == 1);
+    assert (!office.vpn_conflicts_with (lab));
+    assert (office.vpn_conflicts_with (office_host));
+    assert (office_host.vpn_conflicts_with (office));
+    assert (office.vpn_conflicts_with (full));
+    assert (full.vpn_conflicts_with (lab));
+    var kf = new KeyFile ();
+    kf.load_from_data ("[connection]\nid=v\ntype=vpn\n[vpn]\nservice-type=org.freedesktop.NetworkManager.openvpn\nremote=r.example\n", -1, KeyFileFlags.NONE);
+    var plugin = new NmConnection.detached (NmImport.keyfile (kf));
+    assert (plugin.vpn_routes_all_traffic ());
+    assert (plugin.vpn_conflicts_with (office));
+    kf.load_from_data ("[connection]\nid=v\ntype=vpn\n[vpn]\nservice-type=org.freedesktop.NetworkManager.openvpn\nremote=r.example\n[ipv4]\nmethod=auto\nnever-default=true\n", -1, KeyFileFlags.NONE);
+    var split = new NmConnection.detached (NmImport.keyfile (kf));
+    assert (!split.vpn_routes_all_traffic ());
+    assert (!split.vpn_conflicts_with (office));
+}
+
 int main (string[] args) {
     Test.init (ref args);
     Test.add_func ("/nm/addresses", test_addresses);
@@ -315,5 +349,6 @@ int main (string[] args) {
     Test.add_func ("/nm/openvpn", () => { try { test_openvpn (); } catch (Error e) { error (e.message); } });
     Test.add_func ("/nm/simple", test_simple_profiles);
     Test.add_func ("/nm/ipv4-changes", () => { try { test_ipv4_changes (); } catch (Error e) { error (e.message); } });
+    Test.add_func ("/nm/vpn-conflicts", () => { try { test_vpn_conflicts (); } catch (Error e) { error (e.message); } });
     return Test.run ();
 }

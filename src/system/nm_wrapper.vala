@@ -607,14 +607,14 @@ namespace Singularity {
                 vpn_action_result(false, "NetworkManager unavailable");
                 return;
             }
-            var active_vpns = new GenericArray<NmConnection>();
+            var conflicting = new GenericArray<NmConnection>();
             foreach (var active in client.active_connections()) {
                 if (!is_vpn_type(client.active_type(active)) || client.active_uuid(active) == conn.get_uuid())
                     continue;
                 var other = client.connection(client.active_connection(active));
-                if (other != null) active_vpns.add(other);
+                if (other != null && conn.vpn_conflicts_with(other)) conflicting.add(other);
             }
-            foreach (var other in active_vpns.data) {
+            foreach (var other in conflicting.data) {
                 if (!(yield deactivate_vpn(other, true))) return;
             }
             try {
@@ -866,22 +866,28 @@ namespace Singularity {
         }
 
         private void update_vpn_state() {
-            string? active = null;
+            // Several VPNs can be up at once: name the connected ones, or the
+            // ones still connecting when none is connected yet.
+            string[] connected = {};
+            string[] pending = {};
+            string? first = null;
             if (client != null) {
                 foreach (var ac in client.active_connections()) {
-                    if (is_vpn_type(client.active_type(ac))) {
-                        active = ac;
-                        break;
-                    }
+                    if (!is_vpn_type(client.active_type(ac))) continue;
+                    if (first == null) first = client.active_id(ac);
+                    var st = link_state(ac);
+                    if (st == VpnLinkState.CONNECTED) connected += client.active_id(ac);
+                    else if (st == VpnLinkState.CONNECTING) pending += client.active_id(ac);
                 }
             }
-            if (active != null) {
-                vpn_name = client.active_id(active);
-                var st = link_state(active);
-                vpn_active = (st == VpnLinkState.CONNECTED);
+            if (first != null) {
+                vpn_active = connected.length > 0;
+                if (vpn_active) vpn_name = string.joinv(", ", connected);
+                else if (pending.length > 0) vpn_name = string.joinv(", ", pending);
+                else vpn_name = first;
                 vpn_icon = vpn_active ? "network-vpn-symbolic"
-                         : (st == VpnLinkState.CONNECTING ? "network-vpn-acquiring-symbolic"
-                                                          : "network-vpn-no-route-symbolic");
+                         : (pending.length > 0 ? "network-vpn-acquiring-symbolic"
+                                               : "network-vpn-no-route-symbolic");
             } else {
                 vpn_active = false;
                 vpn_name = "";

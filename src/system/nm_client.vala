@@ -153,6 +153,80 @@ namespace Singularity {
             return out;
         }
 
+        /** Every allowed-ips prefix of every WireGuard peer, e.g. "10.9.0.0/16". */
+        public string[] wireguard_allowed_ips() {
+            string[] out = {};
+            var peers = value("wireguard", "peers");
+            if (peers == null || !peers.is_of_type(new VariantType("aa{sv}"))) return out;
+            foreach (var peer in peers) {
+                var ips = peer.lookup_value("allowed-ips", VariantType.STRING_ARRAY);
+                if (ips == null) continue;
+                foreach (var ip in ips.get_strv()) out += ip.strip();
+            }
+            return out;
+        }
+
+        /**
+         * Whether this VPN takes the default route. A WireGuard connection does
+         * so when a peer allows 0.0.0.0/0 or ::/0; a plugin VPN can receive any
+         * route from its server, so it counts as full tunnel unless never-default
+         * keeps the default route away from it.
+         */
+        public bool vpn_routes_all_traffic() {
+            var never_default = value("ipv4", "never-default");
+            if (never_default != null && never_default.is_of_type(VariantType.BOOLEAN)
+                && never_default.get_boolean()) return false;
+            if (get_connection_type() != "wireguard") return true;
+            foreach (var ip in wireguard_allowed_ips()) {
+                if (ip == "0.0.0.0/0" || ip == "::/0") return true;
+            }
+            return false;
+        }
+
+        /**
+         * Whether this VPN and other cannot be active at the same time: one of
+         * them takes the default route, or both are WireGuard connections whose
+         * allowed-ips overlap. Split-tunnel VPNs for different networks coexist.
+         */
+        public bool vpn_conflicts_with(NmConnection other) {
+            if (vpn_routes_all_traffic() || other.vpn_routes_all_traffic()) return true;
+            foreach (var a in wireguard_allowed_ips()) {
+                foreach (var b in other.wireguard_allowed_ips()) {
+                    if (prefixes_overlap(a, b)) return true;
+                }
+            }
+            return false;
+        }
+
+        private static InetAddress? prefix_address(string cidr, out uint length) {
+            int slash = cidr.index_of("/");
+            var addr = new InetAddress.from_string(slash >= 0 ? cidr.substring(0, slash) : cidr);
+            length = addr != null ? (uint) addr.get_native_size() * 8 : 0;
+            uint64 n = 0;
+            if (addr != null && slash >= 0 && uint64.try_parse(cidr.substring(slash + 1), out n) && n < length)
+                length = (uint) n;
+            return addr;
+        }
+
+        /** Two prefixes overlap when they agree on the bits of the shorter one. Host bits are ignored. */
+        internal static bool prefixes_overlap(string a, string b) {
+            uint la, lb;
+            var aa = prefix_address(a, out la);
+            var ab = prefix_address(b, out lb);
+            if (aa == null || ab == null || aa.family != ab.family) return false;
+            uint size = (uint) aa.get_native_size();
+            var ra = new uint8[size];
+            var rb = new uint8[size];
+            Memory.copy(ra, aa.to_bytes(), size);
+            Memory.copy(rb, ab.to_bytes(), size);
+            uint bits = uint.min(la, lb);
+            for (uint i = 0; i < bits; i++) {
+                uint8 bit = (uint8) (0x80 >> (i % 8));
+                if ((ra[i / 8] & bit) != (rb[i / 8] & bit)) return false;
+            }
+            return true;
+        }
+
         internal Variant changed(string setting, HashTable<string, Variant?> changes) {
             var outer = new VariantBuilder(new VariantType("a{sa{sv}}"));
             bool seen = false;
